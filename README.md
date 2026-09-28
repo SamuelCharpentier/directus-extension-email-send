@@ -94,3 +94,7 @@ npm run build
 
 Unit tests are colocated with their sources (`*.test.ts`); the `tests/` directory is reserved for e2e.
 
+## Roadmap
+
+Possible V2 features (request logging, template variable getter/getter/patcher/locker) are tracked in [ROADMAP.md](ROADMAP.md) — none of them are part of the shipped thin-courier endpoint.
+
