@@ -10,34 +10,67 @@ export const UnauthorizedError = createError(
 	401,
 );
 
-export interface AccountabilitySnapshot {
-	user: string | number | null;
-	admin?: boolean;
+export interface PermissionLookupResponse {
+	ok: boolean;
+	status: number;
+	json(): Promise<unknown>;
 }
 
-export interface PermissionsReader {
-	getAllowedFields(action: 'create', collection: string): string[] | false;
+export type PermissionLookupClient = (
+	url: string,
+	init: { headers: Record<string, string> },
+) => Promise<PermissionLookupResponse>;
+
+export interface SendEmailCapabilityContext {
+	accountability: { user: string | number | null } | null;
+	token: string | undefined;
+	baseUrl: string;
+	lookupClient: PermissionLookupClient;
 }
 
-export function assertAuthenticated(
-	accountability: AccountabilitySnapshot | null,
-): asserts accountability is AccountabilitySnapshot {
+function assertAuthenticated(
+	accountability: SendEmailCapabilityContext['accountability'],
+): asserts accountability is { user: string | number } {
 	if (!accountability || accountability.user === null) {
 		throw new UnauthorizedError();
 	}
 }
 
-export function assertSendEmailCapability(permissions: PermissionsReader): void {
-	let allowed: string[] | false;
+function hasCreateAccess(permissionPayload: unknown): boolean {
+	const data = (permissionPayload as { data?: Record<string, unknown> } | null)?.data;
+	const gate = data?.[PERMISSION_TARGET] as { create?: { access?: string } } | undefined;
+	const access = gate?.create?.access;
+
+	return access === 'full' || access === 'partial';
+}
+
+// The requester's resolved permissions are read through /permissions/me, Directus'
+// documented way for custom endpoints to check capabilities. Reading the
+// directus_permissions collection directly with the user's accountability fails for
+// any user that has no read grant on system permissions.
+export async function checkSendEmailCapability(context: SendEmailCapabilityContext): Promise<void> {
+	assertAuthenticated(context.accountability);
+
+	const lookupUrl = `${context.baseUrl.replace(/\/+$/, '')}/permissions/me`;
+
+	let permissionPayload: unknown;
 
 	try {
-		allowed = permissions.getAllowedFields('create', PERMISSION_TARGET);
+		const response = await context.lookupClient(lookupUrl, {
+			headers: { Authorization: `Bearer ${context.token ?? ''}` },
+		});
+
+		if (!response.ok) {
+			throw new Error(`Permission lookup responded with status ${response.status}.`);
+		}
+
+		permissionPayload = await response.json();
 	} catch {
-		// A missing gate collection or failing permission lookup must deny, never crash.
+		// Deny closed when the capability cannot be resolved.
 		throw new ForbiddenError();
 	}
 
-	if (allowed === false || allowed.length === 0) {
+	if (!hasCreateAccess(permissionPayload)) {
 		throw new ForbiddenError();
 	}
 }

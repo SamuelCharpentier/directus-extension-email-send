@@ -29,26 +29,40 @@ function createResponse() {
 }
 
 function createDependencies(options?: {
-	transportResult?: () => Promise<unknown>;
-	allowedFields?: string[] | false;
+	transportResult?: (input: unknown) => Promise<unknown>;
+	createAccess?: string;
 }) {
-	const send = vi.fn(options?.transportResult ?? (async () => ({ messageId: '<mail-1@example.com>', response: '250 OK' })));
-	const getAllowedFields = vi.fn(() => options?.allowedFields ?? ['*']);
+	const send = vi.fn(async (input: unknown) =>
+		options?.transportResult
+			? await options.transportResult(input)
+			: { messageId: '<mail-1@example.com>', response: '250 OK' },
+	);
+
+	const lookupClient = vi.fn(async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({
+			data: {
+				email_send_extension_email_send_requests: { create: { access: options?.createAccess ?? 'full' } },
+			},
+		}),
+	}));
 
 	return {
 		dependencies: {
 			mailer: { send } as Mailer,
-			permissions: { getAllowedFields },
+			capability: { baseUrl: 'http://directus.local:8055', lookupClient },
 		},
 		send,
 	};
 }
 
 const validBody = {
-	to: { email: 'ops@example.com', name: 'Operations Team' },
+	to: { address: 'ops@example.com', name: 'Operations Team' },
 	subject: 'Nightly backup finished',
 	html: '<p>The nightly backup finished successfully.</p>',
 	text: 'The nightly backup finished successfully.',
+	from: { address: 'reports@example.com', name: 'Backup Reporter' },
 };
 
 describe('handleSendHtml', () => {
@@ -56,30 +70,72 @@ describe('handleSendHtml', () => {
 		vi.unstubAllEnvs();
 	});
 
-	it('sends the HTML payload through the mail service and responds with the transport result', async () => {
-		vi.stubEnv('EMAIL_FROM', '');
+	it('passes the validated payload through to the mail service untouched', async () => {
 		const { dependencies, send } = createDependencies();
 		const { response, state } = createResponse();
 
-		await handleSendHtml(createRequest({ ...validBody, from: { address: 'reports@example.com', name: 'Backup Reporter' } }), response, dependencies);
+		await handleSendHtml(createRequest(validBody), response, dependencies);
 
 		expect(send).toHaveBeenCalledWith({
 			to: { address: 'ops@example.com', name: 'Operations Team' },
 			subject: 'Nightly backup finished',
 			html: '<p>The nightly backup finished successfully.</p>',
 			text: 'The nightly backup finished successfully.',
-			from: 'Backup Reporter <reports@example.com>',
+			from: { address: 'reports@example.com', name: 'Backup Reporter' },
 		});
 
 		expect(state.statusCode).toBe(200);
 		expect(state.body).toEqual({ status: 'sent', message_id: '<mail-1@example.com>', response: '250 OK' });
 	});
 
+	it('passes a bare address string through untouched in both directions', async () => {
+		const { dependencies, send } = createDependencies();
+		const { response, state } = createResponse();
+
+		await handleSendHtml(
+			createRequest({
+				to: 'ops@example.com',
+				subject: 'Nightly backup finished',
+				html: '<p>All good.</p>',
+				from: 'reports@example.com',
+				rawHTML: true,
+			}),
+			response,
+			dependencies,
+		);
+
+		expect(send).toHaveBeenCalledWith({
+			to: 'ops@example.com',
+			subject: 'Nightly backup finished',
+			html: '<p>All good.</p>',
+			text: undefined,
+			from: 'reports@example.com',
+		});
+
+		expect(state.statusCode).toBe(200);
+	});
+
+	it('leaves the sender to Directus when the payload omits from', async () => {
+		const { dependencies, send } = createDependencies();
+		const { response, state } = createResponse();
+
+		await handleSendHtml(
+			createRequest({ to: 'ops@example.com', subject: 'Nightly backup finished', html: '<p>All good.</p>' }),
+			response,
+			dependencies,
+		);
+
+		const dispatchedInput = send.mock.calls[0]?.[0] as { from?: unknown } | undefined;
+		expect(dispatchedInput?.from).toBeUndefined();
+
+		expect(state.statusCode).toBe(200);
+	});
+
 	it('degrades to a plain sent status when the transport returns nothing', async () => {
 		const { dependencies } = createDependencies({ transportResult: async () => undefined });
 		const { response, state } = createResponse();
 
-		await handleSendHtml(createRequest({ ...validBody, from: { address: 'reports@example.com' } }), response, dependencies);
+		await handleSendHtml(createRequest(validBody), response, dependencies);
 
 		expect(state.statusCode).toBe(200);
 		expect(state.body).toEqual({ status: 'sent' } satisfies SentEmail);
@@ -90,7 +146,7 @@ describe('handleSendHtml', () => {
 		const { response } = createResponse();
 
 		try {
-			await handleSendHtml(createRequest({ to: { email: 'ops@example.com' }, html: '<p>Hi.</p>' }), response, dependencies);
+			await handleSendHtml(createRequest({ to: 'ops@example.com', html: '<p>Hi.</p>' }), response, dependencies);
 			expect.unreachable('handleSendHtml should have thrown.');
 		} catch (error) {
 			const directusError = error as DirectusError;
@@ -99,18 +155,21 @@ describe('handleSendHtml', () => {
 		}
 	});
 
-	it('throws EMAIL_FROM_MISSING with status 500 when no sender is configured', async () => {
-		vi.stubEnv('EMAIL_FROM', '');
+	it('rejects a formatted sender string with a display name at validation', async () => {
 		const { dependencies, send } = createDependencies();
 		const { response } = createResponse();
 
 		try {
-			await handleSendHtml(createRequest(validBody), response, dependencies);
+			await handleSendHtml(
+				createRequest({ ...validBody, from: 'Backup Reporter <reports@example.com>' }),
+				response,
+				dependencies,
+			);
 			expect.unreachable('handleSendHtml should have thrown.');
 		} catch (error) {
 			const directusError = error as DirectusError;
-			expect(directusError.code).toBe('EMAIL_FROM_MISSING');
-			expect(directusError.status).toBe(500);
+			expect(directusError.code).toBe('INVALID_PAYLOAD');
+			expect(directusError.status).toBe(400);
 		}
 
 		expect(send).not.toHaveBeenCalled();
@@ -127,7 +186,7 @@ describe('handleSendHtml', () => {
 
 		const { response, state } = createResponse();
 
-		await handleSendHtml(createRequest({ ...validBody, from: { address: 'reports@example.com' } }), response, dependencies);
+		await handleSendHtml(createRequest(validBody), response, dependencies);
 
 		expect(state.statusCode).toBe(502);
 		expect(state.body).toEqual({
@@ -152,7 +211,7 @@ describe('handleSendHtml', () => {
 	});
 
 	it('throws FORBIDDEN when the accountability lacks the send-email capability', async () => {
-		const { dependencies, send } = createDependencies({ allowedFields: [] });
+		const { dependencies, send } = createDependencies({ createAccess: 'none' });
 		const { response } = createResponse();
 
 		try {

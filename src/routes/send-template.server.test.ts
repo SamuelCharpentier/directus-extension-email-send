@@ -30,21 +30,30 @@ function createResponse() {
 
 function createDependencies(options?: { transportResult?: () => Promise<unknown> }) {
 	const send = vi.fn(options?.transportResult ?? (async () => ({ messageId: '<mail-2@example.com>', response: '250 OK' })));
+	const lookupClient = vi.fn(async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({
+			data: {
+				email_send_extension_email_send_requests: { create: { access: 'full' } },
+			},
+		}),
+	}));
 
 	return {
 		dependencies: {
 			mailer: { send } as Mailer,
-			permissions: { getAllowedFields: vi.fn(() => ['*']) },
+			capability: { baseUrl: 'http://directus.local:8055', lookupClient },
 		},
 		send,
 	};
 }
 
 const validBody = {
-	to: { email: 'ops@example.com' },
-	template: 'backup-report',
-	data: { machines: 3, failures: 0 },
-	from: { address: 'reports@example.com' },
+	to: 'ops@example.com',
+	subject: 'Nightly backup finished',
+	template: { name: 'backup-report', data: { machines: 3, failures: 0 } },
+	from: { address: 'reports@example.com', name: 'Backup Reporter' },
 };
 
 describe('handleSendTemplate', () => {
@@ -53,16 +62,16 @@ describe('handleSendTemplate', () => {
 	});
 
 	it('passes the template and its data through to the mail service untouched', async () => {
-		vi.stubEnv('EMAIL_FROM', '');
 		const { dependencies, send } = createDependencies();
 		const { response, state } = createResponse();
 
 		await handleSendTemplate(createRequest(validBody), response, dependencies);
 
 		expect(send).toHaveBeenCalledWith({
-			to: { address: 'ops@example.com', name: undefined },
+			to: 'ops@example.com',
+			subject: 'Nightly backup finished',
 			template: { name: 'backup-report', data: { machines: 3, failures: 0 } },
-			from: 'reports@example.com',
+			from: { address: 'reports@example.com', name: 'Backup Reporter' },
 		});
 
 		expect(state.statusCode).toBe(200);
@@ -74,13 +83,33 @@ describe('handleSendTemplate', () => {
 		const { response } = createResponse();
 
 		try {
-			await handleSendTemplate(createRequest({ to: { email: 'ops@example.com' }, data: {} }), response, dependencies);
+			await handleSendTemplate(createRequest({ to: 'ops@example.com', data: {} }), response, dependencies);
 			expect.unreachable('handleSendTemplate should have thrown.');
 		} catch (error) {
 			const directusError = error as DirectusError;
 			expect(directusError.code).toBe('INVALID_PAYLOAD');
 			expect(directusError.status).toBe(400);
 		}
+	});
+
+	it('throws InvalidPayloadError for an email object missing the required display name', async () => {
+		const { dependencies, send } = createDependencies();
+		const { response } = createResponse();
+
+		try {
+			await handleSendTemplate(
+				createRequest({ to: { address: 'ops@example.com' }, subject: 'Nightly backup finished', template: 'backup-report', data: {} }),
+				response,
+				dependencies,
+			);
+			expect.unreachable('handleSendTemplate should have thrown.');
+		} catch (error) {
+			const directusError = error as DirectusError;
+			expect(directusError.code).toBe('INVALID_PAYLOAD');
+			expect(directusError.status).toBe(400);
+		}
+
+		expect(send).not.toHaveBeenCalled();
 	});
 
 	it('responds 502 when the mailer fails to render the template', async () => {

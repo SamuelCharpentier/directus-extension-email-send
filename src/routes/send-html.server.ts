@@ -3,17 +3,15 @@ import type { Response } from 'express';
 import { safeParse } from 'valibot';
 import { SendHtmlPayloadSchema } from '../lib/schemas.server';
 import {
-	assertAuthenticated,
-	assertSendEmailCapability,
-	type PermissionsReader,
+	checkSendEmailCapability,
+	type SendEmailCapabilityContext,
 } from '../services/authorization.server';
-import { resolveFromAddress } from '../services/from-address.server';
 import { sendMail, type Mailer } from '../services/mailer.server';
 import type { EmailRouteRequest } from './route-contracts.server';
 
 export interface SendHtmlDependencies {
+	capability: Omit<SendEmailCapabilityContext, 'accountability' | 'token'>;
 	mailer: Mailer;
-	permissions: PermissionsReader;
 }
 
 export async function handleSendHtml(
@@ -21,8 +19,12 @@ export async function handleSendHtml(
 	res: Response,
 	dependencies: SendHtmlDependencies,
 ): Promise<void> {
-	assertAuthenticated(req.accountability);
-	assertSendEmailCapability(dependencies.permissions);
+	await checkSendEmailCapability({
+		accountability: req.accountability,
+		token: req.token,
+		baseUrl: dependencies.capability.baseUrl,
+		lookupClient: dependencies.capability.lookupClient,
+	});
 
 	const validation = safeParse(SendHtmlPayloadSchema, req.body);
 
@@ -32,16 +34,7 @@ export async function handleSendHtml(
 		});
 	}
 
-	const payload = validation.output;
-	const from = resolveFromAddress(payload.from);
-
-	const delivery = await sendMail(dependencies.mailer, {
-		to: { address: payload.to.email, name: payload.to.name },
-		subject: payload.subject,
-		html: payload.html,
-		text: payload.text,
-		from,
-	});
+	const delivery = await sendMail(dependencies.mailer, validation.output);
 
 	if (delivery.status === 'sent' || delivery.status === 'suppressed') {
 		res.status(200).json(delivery);

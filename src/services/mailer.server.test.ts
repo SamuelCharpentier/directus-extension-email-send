@@ -4,7 +4,7 @@ import { sendMail, type Mailer } from './mailer.server';
 const baseInput = {
 	to: { address: 'ops@example.com', name: 'Operations' },
 	subject: 'Nightly backup finished',
-	from: 'reports@example.com',
+	from: { address: 'reports@example.com' },
 };
 
 describe('sendMail', () => {

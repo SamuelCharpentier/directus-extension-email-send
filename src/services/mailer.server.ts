@@ -1,11 +1,12 @@
-export interface MailerInput {
-	to: { address: string; name?: string };
-	subject?: string;
-	html?: string;
-	text?: string;
-	from: string;
-	template?: { name: string; data: Record<string, unknown> };
-}
+import type { Address } from 'nodemailer/lib/mailer';
+import type { EmailOptions } from '@directus/types';
+
+// The built-in EmailOptions, widened at the one spot where the bundled type is
+// stale: the runtime MailService forwards a nodemailer Address object for "from"
+// untouched (isObject branch), while the bundled type still says string only.
+export type MailerInput = Omit<EmailOptions, 'from'> & {
+	from?: string | Address;
+};
 
 export interface Mailer {
 	send(options: MailerInput): Promise<unknown>;
